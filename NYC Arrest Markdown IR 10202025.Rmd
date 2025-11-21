@@ -1,0 +1,536 @@
+---
+title: "NYC Arrests 1"
+author: "ir"
+date: "2025-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r libraries}
+
+#install.packages(c(
+#  "sp",
+#  "sf",
+#  "spdep",
+#  "ggplot2",
+#  "tidyverse",
+#  "tigris",
+#  "tidycensus",
+#  "dplyr",
+#  "sqldf"
+#))
+
+library(sp)
+library(sf)
+library(spdep)
+library(ggplot2)
+library(tidyverse)
+library(tigris)
+library(tidycensus)
+library(tidyverse)
+library(dplyr)
+library(sqldf)
+```
+
+## Including Plots
+
+```{r census, echo=FALSE}
+
+acs_vars <- load_variables(2023, "acs5", cache = TRUE)
+#census_api_key("your_census_api_key", overwrite = TRUE, install = TRUE)
+census_api_key("3afa3c2871b52fa5a7c62f3c9728050b7db98df8", overwrite = TRUE, install = TRUE)
+readRenviron("~/.Renviron")
+Sys.getenv("CENSUS_API_KEY")
+census_data <- get_acs(
+  geography = "tract",
+  variables = c(median_income = "B19013_001", number_employed = "B23025_004", total_population = "B01001_001", population_over_16 = "B01001_026", civilian_labor_force = "B23025_002", poverytrue = "B06012_002"),
+  state = "NY",
+  county = c("New York", "Kings", "Queens", "Bronx", "Richmond"),
+  geometry = TRUE
+)
+
+census_data <- census_data %>%
+  mutate(
+    tract_id = sub("Census Tract ([0-9\\.]+);.*", "\\1", NAME),  # Extract tract number
+    county = sub(".*; (.*) County;.*", "\\1", NAME),                # Extract county
+    state = sub(".*; .* County; (.*)", "\\1", NAME)                 # Extract state
+  )
+
+census_wide <- census_data %>%
+  pivot_wider(names_from = variable, values_from = c(estimate,moe), values_fill = list(value = NA))
+#number of rows is 2327 - magic number of census tracts in NYC
+
+shape <- read_sf(dsn = "C:/Users/isr4005/Downloads/nynta2020", layer = "nynta2020")
+# we can also use neighborhood instead of census tracts
+```
+
+```{r NYC ArrestData}
+
+NYPD<- read.csv("NYPD_Arrest_Data__Year_to_Date_.csv")
+```
+
+``` {r Merging Arrests with census}
+#Getting distinct tract and county from census data
+st_crs(census_data)
+tracts <- census_data %>% distinct(tract_id,county, geometry)
+neighborhoods <- shape %>% distinct(NTA2020, NTAName, BoroName, geometry)
+plot(neighborhoods["NTA2020"])
+
+# there are 2327 tracts in NYC and 262 neighborhoods
+# Some tracts have the same number even though they are different 
+# you can differentiate by county
+
+NYPD_sf <- st_as_sf(NYPD, coords = c("Longitude", "Latitude"), crs = 4269)
+st_crs(NYPD_sf) #crs is the same for census data and NYPD data
+st_crs(tracts)
+st_crs(neighborhoods)
+neighborhoods_4269 <- st_transform(neighborhoods, crs = 4269)
+plot(neighborhoods_4269["NTA2020"])
+
+plot(NYPD_sf[NYPD_sf$PD_DESC == "MURDER,UNCLASSIFIED",][])
+
+counts2<-data.frame(table(NYPD_sf$PD_DESC, NYPD$PERP_RACE))
+counts <- data.frame(table(NYPD_sf$PD_DESC))
+
+
+arrest_with_tracts <- st_join(tracts, NYPD_sf)
+arrest_with_neighborhoods <- st_join(neighborhoods_4269, NYPD_sf)
+arrest_with_tracts$PD_DESC
+
+theft_values <- c("LARCENY,PETIT FROM OPEN AREAS,",
+                  "ROBBERY,OPEN AREA UNCLASSIFIED",
+                  "THEFT OF SERVICES, UNCLASSIFIE",
+                  "LARCENY,GRAND FROM OPEN AREAS, UNATTENDED",
+                  "BURGLARY,UNCLASSIFIED,UNKNOWN",
+                  "FORGERY,ETC.,UNCLASSIFIED-FELO",
+                  "FORGERY,ETC.-MISD.",
+                  "STOLEN PROPERTY 2,1,POSSESSION",
+                  "LARCENY,GRAND OF AUTO",
+                  "LARCENY,GRAND FROM PERSON,UNCL",
+                  "CONTROLLED SUBSTANCE,SALE 3",
+                  "STOLEN PROPERTY 3,POSSESSION",
+                  "FORGERY-ILLEGAL POSSESSION,VEH",
+                  "BURGLARY,RESIDENCE,NIGHT",
+                  "BURGLARS TOOLS,UNCLASSIFIED",
+                  "STOLEN PROPERTY-MOTOR VEH 2ND,",
+                  "FRAUD,UNCLASSIFIED-FELONY",
+                  "THEFT,RELATED OFFENSES,UNCLASS")
+
+arrests_per_tract <- arrest_with_tracts %>%
+  group_by(tract_id, county) %>%
+  summarize(total_arrests =sum(!is.na(ARREST_DATE)),
+            total_felony = sum(LAW_CAT_CD == "F"),
+            total_misdemeanor = sum(LAW_CAT_CD == "M"),
+            total_violation = sum(LAW_CAT_CD == "V"),
+            theft = sum(PD_DESC %in% theft_values
+                                       ))
+
+arrest_with_neighborhoods_df <- st_drop_geometry(arrest_with_neighborhoods)
+arrests_per_neighborhood <- arrest_with_neighborhoods_df %>%
+  group_by(NTA2020, NTAName, BoroName) %>%
+  summarize(total_arrests =sum(!is.na(ARREST_DATE)),
+            total_felony = sum(LAW_CAT_CD == "F"),
+            total_misdemeanor = sum(LAW_CAT_CD == "M"),
+            total_violation = sum(LAW_CAT_CD == "V"),
+            theft = sum(PD_DESC %in% theft_values))
+
+
+
+neighborhood_arrests <- left_join(neighborhoods_4269, arrests_per_neighborhood,by=c("NTA2020"))
+plot(neighborhood_arrests[neighborhood_arrests$NTAName.x == "Hoffman & Swinburne Islands",]["total_arrests"])   
+plot(neighborhood_arrests["theft"])
+
+neighborhoods_tracts <- st_join(neighborhoods_4269, census_wide)
+neighborhoods_tracts_df <- st_drop_geometry(neighborhoods_tracts)
+neighborhood_census <- neighborhoods_tracts_df %>%
+  group_by(NTA2020, NTAName, BoroName) %>%
+  summarize(poverty =sum(estimate_poverytrue),
+            population = sum(estimate_total_population))
+
+arrests_per_tract_df <- st_drop_geometry(arrests_per_tract)
+census_with_arrests <- left_join(census_wide, arrests_per_tract_df,by=c("tract_id","county"))
+
+neighborhood_census_arrests <- left_join(neighborhood_arrests, neighborhood_census,by=c("NTA2020"))
+
+```
+
+
+```{r Normalize}
+hist(log(0.1+(census_with_arrests$theft*1000/census_with_arrests$estimate_total_population)))
+census_with_arrests$total_population <- census_with_arrests$estimate_total_population
+
+census_with_arrests <- census_with_arrests %>%
+                            mutate(
+                            arrests_per_1000 = (total_arrests/ total_population)*1000,
+                            felony_per_1000 = (total_felony/total_population)*1000,
+                            misdemeanor_per_1000 = (total_misdemeanor/total_population)*1000,
+                            theft_per_1000 = (theft/total_population)*1000,
+                            poverty_pct = (estimate_poverytrue/total_population) )
+
+summary(census_with_arrests$total_population)
+
+##Using Neighborhoods Below
+neighborhood_census_arrests <- neighborhood_census_arrests %>%
+                            mutate(
+                            arrests_per_1000 = (total_arrests/population)*1000,
+                            felony_per_1000 = (total_felony/population)*1000,
+                            misdemeanor_per_1000 = (total_misdemeanor/population)*1000,
+                            theft_per_1000 = (theft/population)*1000,
+                            poverty_pct = (poverty/population) )
+
+plot(neighborhood_census_arrests[neighborhood_census_arrests$NTA2020 != 	
+"BK5691",]["arrests_per_1000"])
+
+neighborhood_census_arrests$log_poverty <- log( neighborhood_census_arrests$poverty_pct)
+neighborhood_census_arrests$log_arrests <- log(neighborhood_census_arrests$total_arrests)
+summary(neighborhood_census_arrests$log_arrests)
+summary(neighborhood_census_arrests$log_poverty)
+hist(neighborhood_census_arrests$log_arrests)
+hist(neighborhood_census_arrests$log_poverty)
+neighborhood_census_arrests_clean <- neighborhood_census_arrests[!is.infinite(neighborhood_census_arrests$log_arrests)
+                                                                 & !is.infinite(neighborhood_census_arrests$log_poverty) &
+                                                                   !is.na(neighborhood_census_arrests$log_arrests),]
+
+neighborhood_model1<-lm(log_arrests ~ log_poverty, data =neighborhood_census_arrests_clean)
+neighborhood_model2<-lm(total_arrests ~ BoroName+ poverty_pct, data =neighborhood_census_arrests)
+plot( x=neighborhood_census_arrests$poverty_pct, y=neighborhood_census_arrests$total_arrests)
+
+summary(neighborhood_model1)
+hist(residuals(neighborhood_model1))
+
+plot(neighborhood_census_arrests_clean["log_arrests"])
+plot
+
+hist(neighborhood_census_arrests$log_poverty)
+
+summary(neighborhood_census_arrests$log_poverty)
+
+fitted_values <- fitted(neighborhood_model1)
+residuals <- residuals(neighborhood_model1)
+hist(residuals)
+plot(fitted_values, residuals)
+plot(neighborhood_census_arrests_clean$log_poverty, 
+     neighborhood_census_arrests_clean$log_arrests)
+
+
+neighborhood_outliers<- neighborhood_census_arrests_clean[residuals < -2,]
+plot(neighborhood_outliers$log_poverty, 
+     neighborhood_outliers$log_arrests, col ="red")
+
+neighborhood_census_arrests_clean$residuals <- residuals
+
+plot(neighborhood_outliers["poverty_pct"], col ="red")
+plot(neighborhood_census_arrests["NTAName"], col = "white")
+
+```
+
+``` {r Outliers}
+
+ggplot() +
+  geom_sf(data = neighborhood_census_arrests_clean, aes(fill = "light gray"), color = "black") +
+  geom_sf(data = neighborhood_outliers, aes(fill = "red"), color = "red")
+
+
+```
+
+
+```{r School Data}
+
+school <- read.csv("2017_-_2018_School_Locations_20250323.csv")
+school_reports <- read.csv("School_Quality_Reports_Data_20250323.csv")
+library(dplyr)
+metrics <-school_reports %>% distinct(Metric.Display.Name,School.Type)
+
+school_reports$topic <- school_reports$Metric.Display.Name
+
+library(sqldf)
+Attendance <- sqldf("select * from school_reports where topic = 'Percentage of Students with 90%+ Attendance'")
+Attendance$School.Number <- Attendance$District..Borough.and.School.Number..DBN.
+school$School.Number <- trimws(school$ATS.SYSTEM.CODE)
+school_attendance <- left_join(x=school, y= Attendance, by = c("School.Number"))
+school_attendance2 <- school_attendance %>% group_by(School.Number, School.Type) %>% 
+  top_n(1, coalesce(Report.Year,0))
+
+
+school_attendance2$x <- as.numeric(school_attendance2$X_COORDINATE)
+school_attendance2$y <- as.numeric(school_attendance2$Y_COORDINATE)
+school_clean <-school_attendance2[!is.na(school_attendance2$x),]
+library(sf)
+school_sf <-  st_as_sf(school_clean, coords = c("x", "y"), crs = 2263)
+st_crs(neighborhood_census_arrests_clean) #4269
+
+st_crs(neighborhoods) #2263
+
+schools_with_neighborhoods <- st_join(neighborhoods, school_sf)
+
+neighborhood_school_attendance <- schools_with_neighborhoods %>%
+  group_by(NTA2020, NTAName) %>%
+  summarize(Value = sum(Metric.Value*Number.of.Students)/sum(Number.of.Students),
+            Students = sum(Number.of.Students))
+
+plot(neighborhood_school_attendance["Students"])
+plot(neighborhood_school_attendance["Value"])
+
+
+neighborhood_school_df<-st_drop_geometry(neighborhood_school_attendance)
+dataset_all <- left_join(x=neighborhood_census_arrests_clean, y= neighborhood_school_df, by = c("NTA2020", "NTAName"))
+dataset_all$log_theft <- log(0.01 + dataset_all$theft_per_1000) 
+
+dataset_all_clean <- dataset_all[which(!is.na(dataset_all$Value)),]
+school_poverty <- lm(Value ~ log_poverty, data=dataset_all_clean)
+modelall <- lm(log_arrests ~log_poverty, data = dataset_all_clean)
+modelall1 <- lm(log_arrests ~log_poverty + Value, data = dataset_all_clean)
+modelall2 <- lm(log_theft ~log_poverty, data = dataset_all_clean)
+modelall3 <- lm(log_theft ~log_poverty + Value, data = dataset_all_clean)
+modelall4 <- lm(log_arrests ~log_poverty + Value +log_poverty*Value, data = dataset_all_clean)
+modelall5 <- lm(log_theft ~log_poverty + Value +log_poverty*Value, data = dataset_all_clean)
+
+modelall4 <- lm(log_arrests ~log_poverty + Value +log_poverty*Value, data = dataset_all_clean)
+
+summary(school_poverty)
+summary(modelall)
+summary(modelall1)
+summary(modelall2)
+summary(modelall3)
+summary(modelall4)
+summary(modelall5)
+
+#install.packages("mediation")
+library(mediation)
+
+set.seed(123)
+mediation_analysis <- mediate(school_poverty, modelall1, treat = "log_poverty", mediator = "Value", boot = TRUE, sims = 1000)
+
+summary(mediation_analysis)
+
+# Extract key results
+med_effects <- data.frame(
+  Effect = c("ACME (Indirect)", "ADE (Direct)", "Total Effect"),
+  Estimate = c(mediation_analysis$d0, mediation_analysis$z0, mediation_analysis$tau.coef),
+  Lower = c(mediation_analysis$d0.ci[1], mediation_analysis$z0.ci[1], mediation_analysis$tau.ci[1]),
+  Upper = c(mediation_analysis$d0.ci[2], mediation_analysis$z0.ci[2], mediation_analysis$tau.ci[2])
+)
+
+library(ggplot2)
+# Plot using ggplot2
+ggplot(med_effects, aes(x = Effect, y = Estimate, ymin = Lower, ymax = Upper)) +
+  geom_pointrange(color = "blue", size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(title = "Mediation Analysis Results",
+       subtitle = "Direct, Indirect (ACME), and Total Effects with 95% CI",
+       x = "Effect Type", y = "Estimate")
+
+hist(residuals(modelall))
+plot(dataset_all$log_poverty, log(dataset_all$theft_per_1000))
+
+library(sf)
+library(sp)
+#converting to Spatial
+nyc_spatial_test <- as_Spatial(st_geometry(dataset_all_clean))
+library(spdep)
+coords_test <- coordinates(nyc_spatial_test)
+neighbors_test <- poly2nb(nyc_spatial_test, snap = 0.001)
+
+# Check the neighbors object
+summary(neighbors_test)
+num_neighbors_test <- card(neighbors_test)
+
+# Visualize polygons with no neighbors
+no_neighbors_test <- which(num_neighbors_test == 0)
+print(no_neighbors_test)
+plot(nyc_spatial_test[no_neighbors_test, ], col = "red")  # Highlight polygons with no neighbors
+neighbors_clean_test <- subset(neighbors_test, subset = num_neighbors_test > 0)
+
+
+# Set zero.policy to TRUE to handle empty neighbor sets if needed
+weights_clean_test <- nb2listw(neighbors_clean_test, style = "W")
+
+# Check for any neighbors with zero connections
+summary(weights_clean_test)
+
+#Clean data with 0 neighbors excluded
+final_cleanz <- dataset_all_clean[-no_neighbors_test, ]
+final_cleanz$LowAttendance <- 1 - final_cleanz$Value
+
+moran.test(final_cleanz$log_arrests, listw = weights_clean_test)
+
+plot(final_cleanz['log_arrests'])
+plot(final_cleanz['LowAttendance'])
+plot(final_cleanz['log_poverty'])
+
+hist(final_cleanz$LowAttendance)
+hist(final_cleanz$log_poverty)
+hist(final_cleanz$log_arrests)
+hist(residuals(modelall3))
+
+final_cleanz_outlier <- final_cleanz[which(residuals(modelall3) < -2 ),]
+
+ols_model <- lm(log_arrests ~log_poverty + Value, data = final_cleanz)
+
+lm_tests <- lm.RStests(ols_model, 
+                       weights_clean_test, 
+                       test = c("LMerr", "RLMerr", "LMlag", "RLMlag", "SARMA"))
+print(lm_tests)
+library(spatialreg)
+poverty_attendance_spatial <- lagsarlm(Value ~log_poverty, data = final_cleanz, 
+                         listw = weights_clean_test, 
+                         type = "mixed")
+durbin_model_neighborhood <- lagsarlm(log_arrests ~log_poverty, data = final_cleanz, 
+                         listw = weights_clean_test, 
+                         type = "mixed")
+durbin_model_neighborhood1 <- lagsarlm(log_arrests ~log_poverty + Value, data = final_cleanz, 
+                         listw = weights_clean_test, 
+                         type = "mixed")
+summary(poverty_attendance_spatial)
+summary(durbin_model_neighborhood)
+summary(durbin_model_neighborhood1)
+
+final_cleanz$mediator <- residuals(poverty_attendance_spatial)
+final_cleanz$outcome <- residuals(durbin_model_neighborhood1)
+
+mediator <- lm(mediator ~ log_poverty, data=final_cleanz)
+outcome <- lm(outcome ~ log_poverty + mediator, data = final_cleanz)
+
+
+set.seed(123)
+mediation_analysis_spatial <- mediate(mediator, outcome, treat = "log_poverty", mediator = "mediator", boot = TRUE, sims = 1000)
+
+summary(mediation_analysis_spatial)
+
+```
+
+
+```{r Maps}
+
+summary(neighborhood_census_arrests_clean$log_arrests)
+
+neighborhood_census_arrests_clean$arrest_discrete <- cut(neighborhood_census_arrests_clean$log_arrests, c(0,4.9,6.2,7,8.564))
+
+
+# Crime Data
+arrest_map <- ggplot(neighborhood_census_arrests_clean) +
+  geom_sf(aes(fill = arrest_discrete)) +
+  scale_fill_manual(values = c("#deebf7" , "#9ecae1", "#3182bd", "#f03b20"),
+                    labels = c("Low", "Moderate", "High", "Highest"), na.translate = F,
+                    name = "")+
+  theme(axis.text=element_text(size=8),                       
+        axis.title=element_text(size=8,face="bold"),
+        plot.title = element_text(face="bold",size=12,hjust = 0.5),
+        plot.subtitle = element_text(size = 12),
+        axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = c(0.3, 0.8),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 20),
+            plot.caption = element_text(size = 10),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.key.size = unit(2, 'cm'))
+
+arrest_map
+
+neighborhood_census_arrests_clean$poverty_discrete <- cut(neighborhood_census_arrests_clean$log_poverty, c(-3.5531,-2.3171,-1.92,-1.5,-0.8264))
+
+summary(neighborhood_census_arrests_clean$log_poverty)
+
+poverty_map <- ggplot(neighborhood_census_arrests_clean) +
+  geom_sf(aes(fill = poverty_discrete)) +
+  scale_fill_manual(values = c("#deebf7" , "#9ecae1", "#3182bd", "#f03b20"),
+                    labels = c("Low", "Moderate", "High", "Highest"), na.translate = F,
+                    name = "")+
+
+  theme(axis.text=element_text(size=8),                       
+        axis.title=element_text(size=8,face="bold"),
+        plot.title = element_text(face="bold",size=12,hjust = 0.5),
+        plot.subtitle = element_text(size = 12),
+        axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = c(0.3, 0.8),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 20),
+            plot.caption = element_text(size = 10),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.key.size = unit(2, 'cm'))
+  
+poverty_map
+
+summary(dataset_all$Value)
+
+dataset_all$attendance_discrete <- cut(dataset_all$Value, c(0.3835,0.6223,0.6774 ,0.7400,0.8795))
+
+
+attendance_map <- ggplot(dataset_all) +
+  geom_sf(aes(fill = attendance_discrete)) +
+  scale_fill_manual(values = c("#deebf7" , "#9ecae1", "#3182bd", "#f03b20"),
+                    labels = c("Low", "Moderate", "High", "Highest"),
+                    name = "")+
+
+  theme(axis.text=element_text(size=8),                       
+        axis.title=element_text(size=8,face="bold"),
+        plot.title = element_text(face="bold",size=12,hjust = 0.5),
+        plot.subtitle = element_text(size = 12),
+        axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = c(0.3, .8),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 20),
+            plot.caption = element_text(size = 10),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.key.size = unit(2, 'cm'))
+
+attendance_map
+
+#install.packages("ggpubr")
+require(ggpubr)
+
+full_plot <- ggarrange(arrest_map,
+                       poverty_map,
+                       attendance_map,
+                       ncol = 2,
+                       nrow = 2)
+full_plot
+
+
+```
+
+
+``` {r mediation spatial}
+#install.packages("rstan", type = "source")
+#install.packages("brms")
+
+library(brms)
+library(rstan)
+# Define Bayesian mediation model with spatial structure
+bf_m <- bf(Value ~ log_poverty + (1 | NTA2020))
+bf_y <- bf(log_arrests ~ log_poverty + Value + (1 | NTA2020))
+#install.packages("cmdstanr", repos = c("https://mc-stan.org/r-packages/", getOption("repos")))
+library(cmdstanr)
+#install_cmdstan()
+library(cmdstanr)
+check_cmdstan_toolchain(fix = TRUE)
+writeLines('PATH="C:\\RBuildTools\\4.4\\usr\\bin;${PATH}"', con = "~/.Renviron")
+system("make --version")
+
+options(brms.backend = "cmdstanr")
+bayesian_model <- brm(
+  bf_m + bf_y + set_rescor(rescor = FALSE),
+  data = final_cleanz, family = gaussian(),
+  chains = 4, iter = 2000
+)
+
+summary(bayesian_model)
+summary(durbin_model_neighborhood1)
+summary(poverty_attendance_spatial)
+
+```
